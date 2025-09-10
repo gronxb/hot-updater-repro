@@ -1,0 +1,329 @@
+name: '🚀 Android Dev Build & Release'
+
+# TODO: NEED TO UPDATE AFTER ADDING SENTRY (NOT WORKING RIGHT NOW)
+# This workflow runs on every push to the 'dev' branch.
+on:
+    push:
+        branches:
+            - dev
+
+permissions:
+    contents: write
+
+env:
+    APK_FILENAME: app-development.apk
+
+# A workflow is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+    # This first job checks if a build is necessary
+    check-changes:
+        name: 🤔 Decide if a Development Build is Needed
+        runs-on: ubuntu-latest
+        # Define outputs that can be used by other jobs
+        outputs:
+            should_build: ${{ steps.final_decision.outputs.should_build }}
+        steps:
+            # Step 1: Check out the repository code
+            - name: 🐙 Checkout Repository
+              uses: actions/checkout@v4
+              with:
+                  # We need to fetch the full history to compare commits
+                  fetch-depth: 0
+
+            # Step 2: Check commit message for generic or branch-specific build tags
+            - name: 📝 Check Commit Message for Build Tags
+              id: commit_check
+              # Make the current branch name available as an environment variable to the script
+              env:
+                  BRANCH_NAME: ${{ github.ref_name }}
+              run: |
+                  commit_message=$(git log -1 --pretty=%B)
+                  echo "Commit message: $commit_message"
+                  echo "Checking for tags relevant to branch: '$BRANCH_NAME'"
+
+                  # Define the patterns for this specific branch
+                  # This checks for [skip-build] OR [skip-build-dev] (if on the dev branch)
+                  skip_pattern="(\[skip-build\]|\[skip-build-${BRANCH_NAME}\])"
+
+                  # This checks for [force-build] OR [force-build-dev] (if on the dev branch)
+                  force_pattern="(\[force-build\]|\[force-build-${BRANCH_NAME}\])"
+
+                  # Check for a matching skip tag
+                  if echo "$commit_message" | grep -qE "$skip_pattern"; then
+                    echo "✅ Found a skip tag matching this branch. Build will be skipped."
+                    echo "decision=skip" >> $GITHUB_OUTPUT
+                  # Check for a matching force tag
+                  elif echo "$commit_message" | grep -qE "$force_pattern"; then
+                    echo "✅ Found a force tag matching this branch. Build will be forced."
+                    echo "decision=force" >> $GITHUB_OUTPUT
+                  else
+                    echo "No relevant build tags found for this branch. Proceeding to file check."
+                    echo "decision=continue" >> $GITHUB_OUTPUT
+                  fi
+
+            # Step 3: Check for changes in native-related files, but only if no manual tag was found
+            - name: 🔍 Check for Native File Changes
+              id: file_check
+              # CORRECTED: This now correctly checks the output from the previous step.
+              if: steps.commit_check.outputs.decision == 'continue'
+              run: |
+                  echo "Checking for native file changes..."
+                  # I've added the other important files you had commented out.
+                  files_to_check="package.json pnpm-lock.yaml app.json eas.json android/ ios/ babel.config.js metro.config.js .npmrc"
+                  changed_files=$(git diff --name-only HEAD~1 HEAD)
+                  build_needed=false
+                  echo -e "Files changed in this push:\n$changed_files"
+                  for path in $files_to_check; do
+                    if echo "$changed_files" | grep -q "^$path"; then
+                      echo "✅ Change detected in '$path'. A new build is required."
+                      build_needed=true
+                      break
+                    fi
+                  done
+                  if [ "$build_needed" = true ]; then
+                    # This step's output is now 'build_needed' to be clear.
+                    echo "build_needed=true" >> $GITHUB_OUTPUT
+                  else
+                    echo "❌ No changes detected in native files. Build will be skipped."
+                    echo "build_needed=false" >> $GITHUB_OUTPUT
+                  fi
+
+            # NEW: Step 4 consolidates the decision from the steps above into the final job output.
+            - name: ✅ Set Final Build Decision
+              id: final_decision
+              run: |
+                  decision=${{ steps.commit_check.outputs.decision }}
+                  build_needed=${{ steps.file_check.outputs.build_needed }}
+                  echo "Commit decision: $decision"
+                  echo "File check decision: $build_needed"
+
+                  if [[ "$decision" == "force" ]]; then
+                    echo "Final decision: ✅ Build is forced."
+                    echo "should_build=true" >> $GITHUB_OUTPUT
+                  elif [[ "$decision" == "skip" ]]; then
+                    echo "Final decision: ❌ Build is skipped by commit tag."
+                    echo "should_build=false" >> $GITHUB_OUTPUT
+                  # Note: The 'or' condition handles the case where file_check didn't run and its output is empty.
+                  elif [[ "$build_needed" == "true" || "$decision" == "continue" && "$build_needed" != "false" ]]; then
+                    echo "Final decision: ✅ Build is needed due to file changes."
+                    echo "should_build=true" >> $GITHUB_OUTPUT
+                  else
+                    echo "Final decision: ❌ No build is needed."
+                    echo "should_build=false" >> $GITHUB_OUTPUT
+                  fi
+
+    # This job decides which runner to use based on a manual override or a repository variable.
+    decide-runner:
+        name: 🚚 Select Build Runner
+        runs-on: ubuntu-latest
+        needs: check-changes
+        if: needs.check-changes.outputs.should_build == 'true'
+        outputs:
+            runner: ${{ steps.decide.outputs.runner }}
+        steps:
+            - name: 🐙 Checkout Repository
+              uses: actions/checkout@v4
+
+            - name: 🕹️ Decide Runner via Commit Tag or Variable
+              id: decide
+              env:
+                  # We read the EAS_BUILD_MODE variable here. If it's not set, we default to 'self' for safety.
+                  BUILD_MODE: ${{ vars.EAS_BUILD_MODE || 'self' }}
+              run: |
+                  commit_message=$(git log -1 --pretty=%B)
+                  echo "Commit message: $commit_message"
+                  echo "Current build mode from repository variable: $BUILD_MODE"
+
+                  # 1. Highest priority: Check for a manual override in the commit message.
+                  if [[ $commit_message == *"[run-on:self]"* ]]; then
+                    echo "✅ Manual override found: [run-on:self]. Using self-hosted runner for this build."
+                    echo "runner=self" >> $GITHUB_OUTPUT
+                    exit 0
+                  elif [[ $commit_message == *"[run-on:expo]"* ]]; then
+                    echo "✅ Manual override found: [run-on:expo]. Using Expo runner for this build."
+                    echo "runner=expo" >> $GITHUB_OUTPUT
+                    exit 0
+                  fi
+
+                  # 2. If no override, use the value from the repository variable.
+                  echo "No manual override found. Using the global setting: '$BUILD_MODE'."
+                  if [[ "$BUILD_MODE" == "expo" ]]; then
+                    echo "runner=expo" >> $GITHUB_OUTPUT
+                  else
+                    echo "runner=self" >> $GITHUB_OUTPUT
+                  fi
+
+    # This job builds the app on EAS cloud services using the robust --json method.
+    build-on-expo:
+        name: ☁️ Build Development App on Expo Cloud (EAS)
+        needs: decide-runner
+        if: needs.decide-runner.outputs.runner == 'expo'
+        runs-on: ubuntu-latest
+        steps:
+            - name: 🐙 Checkout Repository
+              uses: actions/checkout@v4
+
+            - name: 🟢 Setup Node.js v22
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '22'
+
+            # This action sets up the correct pnpm version and handles caching automatically for faster installs.
+            - name: 📦 Setup pnpm with Cache
+              uses: pnpm/action-setup@v4
+              with:
+                  # version: 10.15.0 // Get from package.json
+                  run_install: |
+                      - args: [--frozen-lockfile]
+
+            - name: 🧰 Setup EAS CLI
+              uses: expo/expo-github-action@v8
+              with:
+                  eas-version: latest
+                  token: ${{ secrets.EXPO_TOKEN }}
+
+            - name: 🛠️ Install jq (for parsing JSON)
+              run: |
+                  if [[ "${{ runner.os }}" == "macOS" ]]; then
+                    brew install jq
+                  else
+                    sudo apt-get update && sudo apt-get install -y jq
+                  fi
+
+            - name: 🏗️ EAS Build and Extract URL
+              id: eas
+              env:
+                  EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+              run: |
+                  # Run EAS Build with the --json flag to get machine-readable output.
+                  build_json=$(pnpm eas build --profile development --platform android --non-interactive --wait --json)
+
+                  # Use jq to safely parse the JSON and find the artifact URL.
+                  apk_url=$(echo "$build_json" | jq -r '.[0].artifacts.buildUrl')
+
+                  if [ -z "$apk_url" ] || [ "$apk_url" == "null" ]; then
+                    echo "Error: Could not find APK URL in the JSON output."
+                    echo "EAS Output: $build_json"
+                    exit 1
+                  fi
+
+                  echo "Successfully extracted APK URL: $apk_url"
+                  # Pass the URL to the next step via a step output.
+                  echo "url=$apk_url" >> "$GITHUB_OUTPUT"
+
+            - name: 📥 Download Development APK from EAS
+              run: |
+                  mkdir -p artifact
+                  curl -L "${{ steps.eas.outputs.url }}" -o artifact/${{ env.APK_FILENAME }}
+
+            - name: 📤 Upload APK Artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: android-apk-development
+                  path: artifact/${{ env.APK_FILENAME }}
+
+    # This job builds the app on a self-hosted runner.
+    build-on-self:
+        name: 💻 Build Development App on Self-Hosted Runner
+        needs: decide-runner
+        if: needs.decide-runner.outputs.runner == 'self'
+        runs-on: self-hosted
+        steps:
+            # ✅ ADD THIS NEW STEP FIRST
+            - name: 🧐 Verify Environment Variables
+              run: |
+                  echo "--- Verifying Android Environment ---"
+                  echo "ANDROID_HOME is set to: [$ANDROID_HOME]"
+                  echo "ANDROID_NDK_HOME is set to: [$ANDROID_NDK_HOME]"
+                  echo "JAVA_HOME is set to: [$JAVA_HOME]"
+                  echo "-----------------------------------"
+
+            - name: 🐙 Checkout Repository
+              uses: actions/checkout@v4
+
+            - name: 🟢 Setup Node.js v22
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '22'
+
+            - name: 📦 Setup pnpm with Cache
+              uses: pnpm/action-setup@v4
+              with:
+                  # version: 10.15.0 // Get from package.json
+                  run_install: |
+                      - args: [--frozen-lockfile]
+
+            # ✅ NEW: Add Gradle Caching
+            # This step will dramatically speed up subsequent builds.
+            - name: ⚡ Cache Gradle Dependencies
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.gradle/caches
+                      ~/.gradle/wrapper
+                  key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+                  restore-keys: |
+                      ${{ runner.os }}-gradle-
+
+            - name: 🧰 Setup EAS CLI
+              uses: expo/expo-github-action@v8
+              with:
+                  eas-version: latest
+                  token: ${{ secrets.EXPO_TOKEN }}
+
+            - name: 🩺 Run Expo Doctor Health Check
+              run: pnpm dlx expo-doctor
+
+            - name: 🏗️ EAS Local Build for development
+              id: eas
+              env:
+                  NODE_ENV: development
+                  EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+                  # ✅ NEW: Add verbose logging to see Gradle's progress
+                  EAS_GRADLE_ARGS: '--info'
+              run: |
+                  mkdir -p artifact
+                  pnpm eas build --profile development --platform android --non-interactive --wait --local --output artifact/${{ env.APK_FILENAME }}
+
+            - name: 📤 Upload Development APK Artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: android-apk-development
+                  path: artifact/${{ env.APK_FILENAME }}
+
+    # This final job runs after a successful build to create a GitHub Release.
+    create-release:
+        name: 🎉 Create Development GitHub Release & Distribute
+        # It needs both build jobs, as either one could have run.
+        needs: [build-on-expo, build-on-self]
+        # This condition ensures it only runs if one of the build jobs succeeded.
+        if: always() && (needs.build-on-expo.result == 'success' || needs.build-on-self.result == 'success')
+        runs-on: ubuntu-latest
+        steps:
+            # Step 1: Download the .apk artifact that was uploaded by the successful build job.
+            - name: 📥 Download Development APK Artifact
+              uses: actions/download-artifact@v4
+              with:
+                  name: android-apk-development
+                  path: artifact
+
+            # Step 2: Get the current date for the release name.
+            - name: 🏷️ Generate Development Tag Name
+              id: tag
+              run: echo "name=dev-build-$(date +'%Y-%m-%d')-${{ github.sha }}" >> $GITHUB_OUTPUT
+
+            - name: 📅 Get Current Date
+              id: date
+              run: echo "date=$(date +'%d %b %Y')" >> $GITHUB_OUTPUT
+
+            - name: 🚀 Create Development GitHub Release
+              uses: softprops/action-gh-release@v1
+              with:
+                  # ✅ Use the output from the new step
+                  tag_name: ${{ steps.tag.outputs.name }}
+                  name: Dev Build (${{ steps.date.outputs.date }})
+                  body: |
+                      Development build for Android.
+                      Triggered by commit: ${{ github.sha }}
+                  prerelease: true
+                  files: artifact/${{ env.APK_FILENAME }}

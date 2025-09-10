@@ -1,0 +1,452 @@
+name: '🧪 Android Staging Build & Release'
+
+# This workflow runs on every push to the 'staging' branch.
+on:
+    push:
+        branches:
+            - staging
+
+permissions:
+    contents: write
+
+env:
+    # Centralized APK filename for staging builds
+    APK_FILENAME: app-preview.apk
+
+jobs:
+    # JOB 1: Fast pre-flight checks.
+    validate-commit:
+        name: '🕵️ Validate Commit (Always Runs)'
+        runs-on: ubuntu-latest
+        outputs:
+            highest_historical_version: ${{ steps.validation.outputs.highest_historical_version }}
+        steps:
+            - name: 🐙 Checkout Repository
+              uses: actions/checkout@v4
+              with:
+                  # This is critical for reading the full git history
+                  fetch-depth: 0
+
+            - name: 🟢 Setup Node.js v22
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '22'
+
+            - name: 📦 Install Dependencies
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: |
+                      - args: [--frozen-lockfile]
+
+            - name: 🛠️ Install jq
+              run: sudo apt-get update && sudo apt-get install -y jq
+
+            - name: ▶️ Run Validation Checks
+              id: validation
+              run: |
+                  set -e
+                  # --- CHECK 1: Fingerprint Correctness ---
+                  echo "➡️ Verifying that fingerprint.json is up-to-date..."
+                  pnpm hot-updater fingerprint
+                  echo "✅ OK: Committed fingerprint.json matches the current code state."
+                  echo "-------------------------------------------"
+
+
+                  # --- CHECK 2: Version Consistency ---
+                  echo "➡️ Verifying version consistency..."
+                  pkg_version=$(jq -r .version package.json)
+                  app_config_version=$(node -p "require('./app.config.ts').default.expo.version")
+                  if [[ "$pkg_version" != "$app_config_version" ]]; then
+                    echo "❌ ERROR: Version mismatch detected!"
+                    echo " - package.json version is: $pkg_version"
+                    echo " - app.config.ts version is: $app_config_version"
+                    exit 1
+                  fi
+                  echo "✅ OK: package.json and app.config.ts versions are consistent ($pkg_version)."
+
+
+                  # --- CHECK 3: Prevent Version Downgrade Against Full History ---
+                  echo "➡️ Verifying that the version is not a downgrade against branch history..."
+
+                  # Get a list of all historical versions from package.json on this branch
+                  # and find the highest one using a semantic version sort.
+                  highest_historical_version=$(git log HEAD~1 --pretty=%H --follow -- package.json | \
+                    xargs -I {} git show {}:package.json 2>/dev/null | \
+                    jq -r .version 2>/dev/null | \
+                    sort -V | \
+                    tail -n1 || echo "0.0.0")
+
+                  echo "   > Current push version is: $pkg_version"
+                  echo "   > Highest historical version on this branch is: $highest_historical_version"
+
+                  # Compare the current version against the highest historical one
+                  highest_overall_version=$(printf '%s\n' "$highest_historical_version" "$pkg_version" | sort -V | tail -n1)
+
+                  if [[ "$highest_overall_version" != "$pkg_version" ]]; then
+                    echo "❌ ERROR: Version downgrade detected!"
+                    echo " - Highest version in branch history: $highest_historical_version"
+                    echo " - This push attempts to set it to: $pkg_version"
+                    echo "The new version must be greater than or equal to the highest version in the branch's history."
+                    exit 1
+                  fi
+                  echo "✅ OK: Version ($pkg_version) is not a downgrade from the highest historical version ($highest_historical_version)."
+                  echo "highest_historical_version=$highest_historical_version" >> "$GITHUB_OUTPUT"
+
+    # JOB 2: Decide if a build is needed.
+    check-changes:
+        name: 🤔 Decide if a Staging Build is Needed
+        runs-on: ubuntu-latest
+        needs: validate-commit
+        outputs:
+            should_build: ${{ steps.final_decision.outputs.should_build }}
+        steps:
+            - name: 🐙 Checkout Repository
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0 # Need at least 2 for git diff HEAD~1
+
+            - name: 🛠️ Install jq
+              run: sudo apt-get update && sudo apt-get install -y jq
+
+            - name: 📝 Check for Build Tags or Fingerprint Changes
+              id: final_decision
+              run: |
+                  git fetch --tags
+                  commit_message=$(git log -1 --pretty=%B)
+                  force_pattern="(\[force-build\]|\[force-build-${{ github.ref_name }}\])"
+
+                  if echo "$commit_message" | grep -qE "$force_pattern"; then
+                    echo "✅ Found a force tag. Build will be triggered."
+                    echo "should_build=true" >> $GITHUB_OUTPUT
+                    exit 0
+                  fi
+
+                  echo "➡️ Comparing fingerprint against the last successful build..."
+
+                  # UPDATED LOGIC: Compare HEAD against the 'staging-latest-success' tag
+                  # If the tag doesn't exist (first run), this will fail gracefully and trigger a build.
+                  old_hash=$(git show staging-latest-success:fingerprint.json | jq -r .android.hash || echo "no_successful_build_yet")
+                  new_hash=$(jq -r .android.hash fingerprint.json)
+
+                  echo "   > Hash of last successful build: $old_hash"
+                  echo "   > Hash of current commit:       $new_hash"
+
+                  if [[ "$old_hash" != "$new_hash" ]]; then
+                    echo "✅ Fingerprint hash has changed since the last successful build. A new build is required."
+                    echo "should_build=true" >> $GITHUB_OUTPUT
+                  else
+                    echo "❌ Fingerprint hash is unchanged since the last successful build. Build will be skipped."
+                    echo "should_build=false" >> $GITHUB_OUTPUT
+                  fi
+
+    # ============================================================================== #
+    # === THIS IS THE OTA UPDATE PATH ===                                        === #
+    # ============================================================================== #
+    deploy-ota-update:
+        name: 🚀 Deploy OTA Update
+        runs-on: ubuntu-latest
+        needs: [validate-commit, check-changes]
+        # This is the key: it runs when a build is NOT needed, but validation passed.
+        if: needs.validate-commit.result == 'success' && needs.check-changes.outputs.should_build == 'false'
+        steps:
+            - name: 🐙 Checkout Repository
+              uses: actions/checkout@v4
+
+            - name: 🟢 Setup Node.js v22
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '22'
+
+            - name: 📦 Install Dependencies
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: |
+                      - args: [--frozen-lockfile]
+
+            # The hot-updater CLI needs access to Cloudflare secrets to deploy
+            - name: ✨ Create .env file for deployment
+              run: |
+                  echo "HOT_UPDATER_CLOUDFLARE_R2_BUCKET_NAME=${{ secrets.HOT_UPDATER_CLOUDFLARE_R2_BUCKET_NAME }}" >> .env
+                  echo "HOT_UPDATER_CLOUDFLARE_ACCOUNT_ID=${{ secrets.HOT_UPDATER_CLOUDFLARE_ACCOUNT_ID }}" >> .env
+                  echo "HOT_UPDATER_CLOUDFLARE_API_TOKEN=${{ secrets.HOT_UPDATER_CLOUDFLARE_API_TOKEN }}" >> .env
+                  echo "HOT_UPDATER_CLOUDFLARE_D1_DATABASE_ID=${{ secrets.HOT_UPDATER_CLOUDFLARE_D1_DATABASE_ID }}" >> .env
+                  echo "EXPO_PUBLIC_HOT_UPDATER_URL=${{ secrets.EXPO_PUBLIC_HOT_UPDATER_URL }}" >> .env
+                  echo "✅ .env file created successfully for OTA deployment."
+
+            - name: 🚀 Deploy to Staging (OTA)
+              run: |
+                  # Read the version from package.json to use as the target version
+                  APP_VERSION=$(jq -r .version package.json)
+                  echo "Deploying OTA update for app version: $APP_VERSION"
+                  # pnpm hot-updater deploy -p android -c preview -m "Hello OTA 1"
+                  pnpm hot-updater deploy -p android -c preview -t "$APP_VERSION"
+
+    # ============================================================================== #
+    # === NATIVE BUILD PATH STARTS HERE ===                                      === #
+    # ============================================================================== #
+    validate-build-requirements:
+        name: '🔎 Validate Build Requirements'
+        runs-on: ubuntu-latest
+        needs: [validate-commit, check-changes]
+        # This job ONLY runs if the previous job decided a build is needed.
+        if: needs.check-changes.outputs.should_build == 'true'
+        steps:
+            - name: 🐙 Checkout Repository
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: 🛠️ Install jq
+              run: sudo apt-get update && sudo apt-get install -y jq
+
+            - name: ▶️ Check for Version Bump
+              run: |
+                  echo "➡️ A native build was triggered. Verifying version has been strictly bumped..."
+                   pkg_version=$(jq -r .version package.json)
+
+                   # --- THIS IS THE KEY ---
+                   # We now read the version from the output of the first job.
+                   # This avoids re-calculating it and is much more efficient.
+                   highest_historical_version="${{ needs.validate-commit.outputs.highest_historical_version }}"
+                   
+                   echo "   > Current push version is: $pkg_version"
+                   echo "   > Highest historical version on this branch is: $highest_historical_version"
+
+                   # Compare the versions
+                   highest_version=$(printf '%s\n' "$highest_historical_version" "$pkg_version" | sort -V | tail -n1)
+
+                   # This condition now checks for two failure cases:
+                   # 1. The version is the same (not bumped).
+                   # 2. The version is a downgrade (already caught by validate-commit, but good to have).
+                   if [[ "$pkg_version" == "$highest_historical_version" ]] || [[ "$highest_version" != "$pkg_version" ]]; then
+                     echo "❌ ERROR: A native build is required, but the version was not increased."
+                     echo " - Highest version in branch history: $highest_historical_version"
+                     echo " - Current version:  $pkg_version"
+                     echo "Please increment the version in package.json and app.config.ts."
+                     exit 1
+                   fi
+                   echo "✅ OK: Version was correctly bumped from $highest_historical_version to $pkg_version."
+
+    # This job decides the runner (logic is reusable)
+    decide-runner:
+        name: 🚚 Select Build Runner
+        runs-on: ubuntu-latest
+        needs: validate-build-requirements
+        if: always() && needs.validate-build-requirements.result == 'success'
+        outputs:
+            runner: ${{ steps.decide.outputs.runner }}
+        steps:
+            - name: 🐙 Checkout Repository
+              uses: actions/checkout@v4
+            - name: 🕹️ Decide Runner via Commit Tag or Variable
+              id: decide
+              env:
+                  BUILD_MODE: ${{ vars.EAS_BUILD_MODE || 'self' }}
+              run: |
+                  commit_message=$(git log -1 --pretty=%B)
+                  if [[ $commit_message == *"[run-on:self]"* ]]; then
+                    echo "runner=self" >> $GITHUB_OUTPUT
+                  elif [[ $commit_message == *"[run-on:expo]"* ]]; then
+                    echo "runner=expo" >> $GITHUB_OUTPUT
+                  elif [[ "$BUILD_MODE" == "expo" ]]; then
+                    echo "runner=expo" >> $GITHUB_OUTPUT
+                  else
+                    echo "runner=self" >> $GITHUB_OUTPUT
+                  fi
+
+    # Build on EAS cloud for staging
+    # TODO: NEED TO UPDATE AFTER ADDING SENTRY (NOT WORKING RIGHT NOW)
+    build-on-expo:
+        name: ☁️ Build Staging App on Expo Cloud (EAS)
+        needs: decide-runner
+        if: needs.decide-runner.outputs.runner == 'expo'
+        runs-on: ubuntu-latest
+        steps:
+            - name: 🐙 Checkout Repository
+              uses: actions/checkout@v4
+            - name: 🟢 Setup Node.js v22
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '22'
+            - name: 📦 Setup pnpm with Cache
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: |
+                      - args: [--frozen-lockfile]
+            - name: 🧰 Setup EAS CLI
+              uses: expo/expo-github-action@v8
+              with:
+                  eas-version: latest
+                  token: ${{ secrets.EXPO_TOKEN }}
+            - name: 🛠️ Install jq (for parsing JSON)
+              run: sudo apt-get update && sudo apt-get install -y jq
+
+            - name: 🏗️ EAS Build for Staging
+              id: eas
+              env:
+                  EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+              run: |
+                  # Use the 'preview' profile for staging builds
+                  build_json=$(pnpm eas build --profile preview --platform android --non-interactive --wait --json)
+                  apk_url=$(echo "$build_json" | jq -r '.[0].artifacts.buildUrl')
+                  if [ -z "$apk_url" ] || [ "$apk_url" == "null" ]; then
+                    echo "Error: Could not find APK URL in the JSON output."
+                    exit 1
+                  fi
+                  echo "url=$apk_url" >> "$GITHUB_OUTPUT"
+            - name: 📥 Download Staging APK from EAS
+              run: |
+                  mkdir -p artifact
+                  curl -L "${{ steps.eas.outputs.url }}" -o artifact/${{ env.APK_FILENAME }}
+            - name: 📤 Upload Staging APK Artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: android-apk-staging
+                  path: artifact/${{ env.APK_FILENAME }}
+
+    # Build on a self-hosted runner for staging
+    build-on-self:
+        name: 💻 Build Staging App on Self-Hosted Runner
+        needs: decide-runner
+        if: needs.decide-runner.outputs.runner == 'self'
+        runs-on: self-hosted
+        steps:
+            - name: 🧐 Verify Environment Variables
+              run: |
+                  echo "--- Verifying Android Environment ---"
+                  echo "ANDROID_HOME is set to: [$ANDROID_HOME]"
+                  echo "ANDROID_NDK_HOME is set to: [$ANDROID_NDK_HOME]"
+                  echo "JAVA_HOME is set to: [$JAVA_HOME]"
+
+            - name: 🐙 Checkout Repository
+              uses: actions/checkout@v4
+
+            - name: 🟢 Setup Node.js v22
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '22'
+
+            - name: 📦 Setup pnpm with Cache
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: |
+                      - args: [--frozen-lockfile]
+
+            # TODO: THERE ARE LOT OF SENTRY VARIABLES IN THE FILE NEED TO TEST AND REMOVE IN FUTURE
+            # Create the .env file from GitHub Secrets
+            - name: ✨ Create .env file
+              run: |
+                  echo "HOT_UPDATER_CLOUDFLARE_R2_BUCKET_NAME=${{ secrets.HOT_UPDATER_CLOUDFLARE_R2_BUCKET_NAME }}" >> .env
+                  echo "HOT_UPDATER_CLOUDFLARE_ACCOUNT_ID=${{ secrets.HOT_UPDATER_CLOUDFLARE_ACCOUNT_ID }}" >> .env
+                  echo "HOT_UPDATER_CLOUDFLARE_API_TOKEN=${{ secrets.HOT_UPDATER_CLOUDFLARE_API_TOKEN }}" >> .env
+                  echo "HOT_UPDATER_CLOUDFLARE_D1_DATABASE_ID=${{ secrets.HOT_UPDATER_CLOUDFLARE_D1_DATABASE_ID }}" >> .env
+                  echo "EXPO_PUBLIC_HOT_UPDATER_URL=${{ secrets.EXPO_PUBLIC_HOT_UPDATER_URL }}" >> .env
+                  echo "SENTRY_AUTH_TOKEN=${{ secrets.SENTRY_AUTH_TOKEN }}" >> .env
+                  echo "SENTRY_ORG=${{ secrets.SENTRY_ORG }}" >> .env
+                  echo "SENTRY_PROJECT=${{ secrets.SENTRY_PROJECT }}" >> .env
+                  echo "✅ .env file created successfully for local build."
+
+            # ADD THIS NEW STEP
+            - name: ⚙️ Create Sentry Properties File
+              run: |
+                  echo "defaults.org=${{ secrets.SENTRY_ORG }}" >> sentry.properties
+                  echo "defaults.project=${{ secrets.SENTRY_PROJECT }}" >> sentry.properties
+                  echo "auth.token=${{ secrets.SENTRY_AUTH_TOKEN }}" >> sentry.properties
+                  echo "cli.logLevel=debug" >> sentry.properties # <-- ADD THIS LINE
+                  echo "✅ sentry.properties file created successfully."
+
+            - name: ⚡ Setup Gradle and Cache Dependencies
+              uses: gradle/actions/setup-gradle@v3
+
+            - name: 🧰 Setup EAS CLI
+              uses: expo/expo-github-action@v8
+              with:
+                  eas-version: latest
+                  token: ${{ secrets.EXPO_TOKEN }}
+
+            - name: 📱 Prebuild Native Android Project
+              env:
+                  CI: 1
+              run: pnpm expo prebuild --platform android --clean
+
+            # ================================================================= #
+            # === NEW STEP: Create and embed the fingerprint before building === #
+            # ================================================================= #
+            - name: 👣 Create and Embed Fingerprint
+              run: pnpm hot-updater fingerprint create
+            # ================================================================= #
+
+            - name: 🩺 Run Expo Doctor Health Check
+              run: pnpm dlx expo-doctor
+
+            - name: 🏗️ EAS Local Build for Staging
+              env:
+                  NODE_ENV: production # 'preview' is closer to production than development
+                  EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+                  EAS_GRADLE_ARGS: '--info'
+                  # ADD THIS LINE to directly expose the secret to the build command
+                  EXPO_PUBLIC_HOT_UPDATER_URL: ${{ secrets.EXPO_PUBLIC_HOT_UPDATER_URL }}
+                  EXPO_PUBLIC_SENTRY_DSN: ${{ secrets.EXPO_PUBLIC_SENTRY_DSN }}
+                  SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+                  SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+                  SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+
+              run: |
+                  mkdir -p artifact
+                  pnpm eas build --profile preview --platform android --non-interactive --wait --local --output artifact/${{ env.APK_FILENAME }}
+
+            - name: 📤 Upload Staging APK Artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: android-apk-staging
+                  path: artifact/${{ env.APK_FILENAME }}
+
+    # Create a GitHub Release for the staging build
+    create-release:
+        name: 🎉 Create Staging GitHub Release & Distribute
+        needs: [build-on-expo, build-on-self]
+        if: always() && (needs.build-on-expo.result == 'success' || needs.build-on-self.result == 'success')
+        runs-on: ubuntu-latest
+        steps:
+            - name: 🐙 Checkout Repository
+              uses: actions/checkout@v4
+
+            - name: 📥 Download Staging APK Artifact
+              uses: actions/download-artifact@v4
+              with:
+                  name: android-apk-staging # Match the artifact name from build jobs
+                  path: artifact
+
+            - name: 🏷️ Generate Staging Tag Name
+              id: tag
+              run: echo "name=staging-build-$(date +'%Y-%m-%d')-${{ github.sha }}" >> $GITHUB_OUTPUT
+
+            - name: 📅 Get Current Date
+              id: date
+              run: echo "date=$(date +'%d %b %Y')" >> $GITHUB_OUTPUT
+
+            - name: 🚀 Create Staging GitHub Release
+              uses: softprops/action-gh-release@v1
+              with:
+                  tag_name: ${{ steps.tag.outputs.name }}
+                  name: Staging Build (${{ steps.date.outputs.date }})
+                  body: |
+                      Staging build for Android QA and internal testing.
+                      **Commit:** [`${{ github.sha }}`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
+                      **Triggered by:** @${{ github.actor }}
+                  prerelease: true
+                  files: artifact/${{ env.APK_FILENAME }}
+
+            # --- NEW STEPS TO UPDATE THE SUCCESS TAG ---
+            - name: 🔖 Move 'staging-latest-success' Tag
+              run: |
+                  # Configure git with a user and email
+                  git config user.name "GitHub Actions"
+                  git config user.email "actions@github.com"
+
+                  # Create the tag pointing to the current commit, force (-f) to move it if it exists
+                  git tag -f staging-latest-success ${{ github.sha }}
+
+                  # Force push the tag to the remote repository
+                  git push -f origin staging-latest-success
+                  echo "✅ Successfully moved 'staging-latest-success' tag to commit ${{ github.sha }}."

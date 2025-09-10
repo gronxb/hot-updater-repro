@@ -1,0 +1,11 @@
+# Ignore artifacts:
+build
+dist/
+coverage
+pnpm-lock.yaml
+pnpm-workspace.yaml
+node_modules
+pre-commit
+commit-msg
+logs/
+llm.txt
