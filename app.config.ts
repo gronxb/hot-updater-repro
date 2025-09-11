@@ -2,8 +2,8 @@ import 'dotenv/config'
 
 export default {
 	expo: {
-		name: 'gym-app',
-		slug: 'gym-app',
+		name: 'my-app',
+		slug: 'my-app',
 		version: '1.0.699',
 		orientation: 'portrait',
 		icon: './src/assets/images/icon.png',
@@ -32,8 +32,8 @@ export default {
 				'@sentry/react-native/expo',
 				{
 					url: 'https://sentry.io/',
-					project: 'YOUR_PROJECT_SLUG',
-					organization: 'YOUR_ORGNIZATION_SLUG'
+					project: 'react-native',
+					organization: 'hot-updater'
 				}
 			],
 			'expo-router',
@@ -61,8 +61,7 @@ export default {
 		extra: {
 			router: {},
 			eas: {
-				// TODO: PLEASE ADD YOUR
-				projectId: 'xyz'
+				projectId: 'da2a6561-c38c-4a8b-8bb8-516cd3e4f86c'
 			}
 		},
 		// owner: 'phonepuffs',
@@ -70,9 +69,7 @@ export default {
 			policy: 'appVersion'
 		},
 		updates: {
-			enabled: true,
-			// TODO: PLEASE ADD YOUR
-			url: 'https://u.expo.dev/xyz'
+			enabled: false
 		}
 	}
 }

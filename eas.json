@@ -1,6 +1,7 @@
 {
 	"cli": {
-		"version": ">= 3.0.0"
+		"version": ">= 3.0.0",
+		"appVersionSource": "remote"
 	},
 	"build": {
 		"development": {
@@ -21,7 +22,8 @@
 			"env": {
 				"HUSKY": "0",
 				"NODE_ENV": "production",
-				"EXPO_PUBLIC_NODE_ENV": "preview"
+				"EXPO_PUBLIC_NODE_ENV": "preview",
+				"EXPO_PUBLIC_HOT_UPDATER_URL": "https://hot-updater.gron1gh1.workers.dev/api/check-update"
 			},
 			"android": {
 				"buildType": "apk"
