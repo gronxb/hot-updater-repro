@@ -22,8 +22,7 @@
 			"env": {
 				"HUSKY": "0",
 				"NODE_ENV": "production",
-				"EXPO_PUBLIC_NODE_ENV": "preview",
-				"EXPO_PUBLIC_HOT_UPDATER_URL": "https://hot-updater.gron1gh1.workers.dev/api/check-update"
+				"EXPO_PUBLIC_NODE_ENV": "preview"
 			},
 			"android": {
 				"buildType": "apk"
