@@ -4,7 +4,7 @@ export default {
 	expo: {
 		name: 'my-app',
 		slug: 'my-app',
-		version: '1.0.702',
+		version: '1.0.703',
 		orientation: 'portrait',
 		icon: './src/assets/images/icon.png',
 		scheme: 'gymapp',
