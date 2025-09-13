@@ -4,7 +4,7 @@ export default {
 	expo: {
 		name: 'my-app',
 		slug: 'my-app',
-		version: '1.0.705',
+		version: '1.0.706',
 		orientation: 'portrait',
 		icon: './src/assets/images/icon.png',
 		scheme: 'gymapp',
@@ -28,14 +28,6 @@ export default {
 			favicon: './src/assets/images/favicon.png'
 		},
 		plugins: [
-			[
-				'@sentry/react-native/expo',
-				{
-					url: 'https://sentry.io/',
-					project: 'react-native',
-					organization: 'hot-updater'
-				}
-			],
 			'expo-router',
 			'expo-dev-client',
 			[

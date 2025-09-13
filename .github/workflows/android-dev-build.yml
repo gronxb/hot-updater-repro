@@ -1,6 +1,5 @@
 name: '🚀 Android Dev Build & Release'
 
-# TODO: NEED TO UPDATE AFTER ADDING SENTRY (NOT WORKING RIGHT NOW)
 # This workflow runs on every push to the 'dev' branch.
 on:
     push:

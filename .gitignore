@@ -47,6 +47,4 @@ app.txt
 # hot-updater
 .hot-updater/output
 
-.sentryclirc
-
 .env.local

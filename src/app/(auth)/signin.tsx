@@ -1,5 +1,4 @@
 import { AntDesign } from '@expo/vector-icons'
-import * as Sentry from '@sentry/react-native'
 import { Link } from 'expo-router'
 import { useState } from 'react'
 import { KeyboardAvoidingView, Platform, ScrollView, Text, View } from 'react-native'
@@ -22,10 +21,6 @@ const Signin: React.FC = (): React.JSX.Element => {
 	}
 
 	const handlePress = (): void => {
-		// This message will appear on your Sentry dashboard!
-		Sentry.captureMessage('Hello World from Production App!')
-
-		// This will show up as a "breadcrumb" in Sentry
 		console.log('User clicked the button.')
 	}
 
@@ -48,7 +43,7 @@ const Signin: React.FC = (): React.JSX.Element => {
 				</View>
 
 				<Button
-					title='Test Sentry Crash'
+					title='Test Crash'
 					onPress={() => {
 						throw new Error('This is a test crash from the Expo app!')
 					}}
