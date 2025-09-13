@@ -309,7 +309,7 @@ jobs:
         name: 💻 Build Staging App on Self-Hosted Runner
         needs: decide-runner
         if: needs.decide-runner.outputs.runner == 'self'
-        runs-on: self-hosted
+        runs-on: ubuntu-latest
         steps:
             - name: 🧐 Verify Environment Variables
               run: |
