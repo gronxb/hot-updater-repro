@@ -341,7 +341,19 @@ jobs:
                   echo "HOT_UPDATER_CLOUDFLARE_API_TOKEN=${{ secrets.HOT_UPDATER_CLOUDFLARE_API_TOKEN }}" >> .env
                   echo "HOT_UPDATER_CLOUDFLARE_D1_DATABASE_ID=${{ secrets.HOT_UPDATER_CLOUDFLARE_D1_DATABASE_ID }}" >> .env
                   echo "EXPO_PUBLIC_HOT_UPDATER_URL=${{ secrets.EXPO_PUBLIC_HOT_UPDATER_URL }}" >> .env
+                  echo "SENTRY_AUTH_TOKEN=${{ secrets.SENTRY_AUTH_TOKEN }}" >> .env
+                  echo "SENTRY_ORG=${{ secrets.SENTRY_ORG }}" >> .env
+                  echo "SENTRY_PROJECT=${{ secrets.SENTRY_PROJECT }}" >> .env
                   echo "✅ .env file created successfully for local build."
+
+            # ADD THIS NEW STEP
+            - name: ⚙️ Create Sentry Properties File
+              run: |
+                  echo "defaults.org=${{ secrets.SENTRY_ORG }}" >> sentry.properties
+                  echo "defaults.project=${{ secrets.SENTRY_PROJECT }}" >> sentry.properties
+                  echo "auth.token=${{ secrets.SENTRY_AUTH_TOKEN }}" >> sentry.properties
+                  echo "cli.logLevel=debug" >> sentry.properties # <-- ADD THIS LINE
+                  echo "✅ sentry.properties file created successfully."
 
             - name: ⚡ Setup Gradle and Cache Dependencies
               uses: gradle/actions/setup-gradle@v3
@@ -375,6 +387,10 @@ jobs:
                   # ADD THIS LINE to directly expose the secret to the build command
                   EXPO_PUBLIC_HOT_UPDATER_URL: ${{ secrets.EXPO_PUBLIC_HOT_UPDATER_URL }}
                   EXPO_PUBLIC_SENTRY_DSN: ${{ secrets.EXPO_PUBLIC_SENTRY_DSN }}
+                  SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+                  SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+                  SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+
               run: |
                   mkdir -p artifact
                   pnpm eas build --profile preview --platform android --non-interactive --wait --local --output artifact/${{ env.APK_FILENAME }}
