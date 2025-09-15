@@ -33,7 +33,7 @@ const Signin: React.FC = (): React.JSX.Element => {
 				showsVerticalScrollIndicator={false}>
 				{/* Header */}
 				<View style={styles.header}>
-					<Text style={styles.title}>HI OTA v3</Text>
+					<Text style={styles.title}>HI OTA v4</Text>
 					<Text style={styles.subtitle}>Enter your login information</Text>
 					<Text
 						style={styles.subtitle}

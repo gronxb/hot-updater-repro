@@ -178,8 +178,8 @@ jobs:
                   # Read the version from package.json to use as the target version
                   APP_VERSION=$(jq -r .version package.json)
                   echo "Deploying OTA update for app version: $APP_VERSION"
-                  # pnpm hot-updater deploy -p android -c preview -m "Hello OTA 1"
-                  pnpm hot-updater deploy -p android -c preview -t "$APP_VERSION"
+                  # pnpm hot-updater deploy -p android -c preview -m "Hello OTA 1" -f
+                  pnpm hot-updater deploy -p android -c preview -t "$APP_VERSION" -f
 
     # ============================================================================== #
     # === NATIVE BUILD PATH STARTS HERE ===                                      === #
